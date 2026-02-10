@@ -1,5 +1,6 @@
+import re
 import psycopg
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -8,6 +9,18 @@ from langchain_core.output_parsers import StrOutputParser
 
 from app.config import settings
 from app.schemas import Message, Source
+
+
+# 카테고리 자동 감지 키워드 맵
+_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "자연/재해": ["비", "가뭄", "지진", "홍수", "일식", "혜성", "태풍", "기근", "서리", "눈"],
+    "형벌/사법": ["추국", "죄인", "유배", "처형", "의금부", "국문", "사형", "귀양", "형벌"],
+    "국방/외교": ["전쟁", "군사", "오랑캐", "사신", "왜구", "침략", "병사", "진", "방어"],
+    "경제/재정": ["세금", "공물", "호조", "환곡", "조세", "재정", "비축", "곡식", "민전"],
+    "의례/왕실": ["제사", "종묘", "책봉", "가례", "왕비", "왕세자", "능", "예법", "혼례"],
+    "교육/과거": ["과거", "성균관", "유생", "서원", "학문", "경서", "문과", "무과"],
+    "정치/행정": ["임명", "파직", "상소", "경연", "사헌부", "이조", "병조", "판서", "대신"],
+}
 
 
 class ChatService:
@@ -42,9 +55,6 @@ class ChatService:
 
     # ──────────────────────────────────────────────
     # 페르소나 → 왕 이름 조회
-    # historical_documents.metadata->>'king' 필터로 사용
-    # 예) persona.name='태조 이성계' → king='태조'
-    #     persona.name='정종'       → king='정종'
     # ──────────────────────────────────────────────
 
     def _get_king_name(self, persona_id: int) -> str:
@@ -53,12 +63,22 @@ class ChatService:
                 cur.execute("SELECT name FROM personas WHERE id = %s", (persona_id,))
                 row = cur.fetchone()
                 if row:
-                    import re
-                    return re.sub(r'\(.*?\)', '', row[0].split()[0]).strip()  # '정조(조선)' → '정조'
+                    return re.sub(r'\(.*?\)', '', row[0].split()[0]).strip()
                 return ""
 
     # ──────────────────────────────────────────────
-    # 유사도 검색 (pgvector 직접 쿼리)
+    # 카테고리 자동 감지
+    # ──────────────────────────────────────────────
+
+    def _detect_category(self, query: str) -> Optional[str]:
+        for category, keywords in _CATEGORY_KEYWORDS.items():
+            for kw in keywords:
+                if kw in query:
+                    return category
+        return None
+
+    # ──────────────────────────────────────────────
+    # 하이브리드 유사도 검색
     # ──────────────────────────────────────────────
 
     def get_relevant_documents(
@@ -67,46 +87,107 @@ class ChatService:
         persona_id: int,
         top_k: int = None,
         similarity_cutoff: float = None,
+        keywords: Optional[List[str]] = None,
+        category: Optional[str] = None,
+        keyword_weight: Optional[float] = 0.3,
     ) -> Tuple[List[Dict], List[Source]]:
         top_k = top_k or settings.top_k_documents
         similarity_cutoff = similarity_cutoff or settings.similarity_cutoff
+        keyword_weight = keyword_weight if keyword_weight is not None else 0.3
+        vector_weight = 1.0 - keyword_weight
+
+        # 카테고리 자동 감지 (명시되지 않은 경우)
+        if category is None:
+            category = self._detect_category(query)
 
         # 쿼리 임베딩 생성
         query_vec = self.embeddings.embed_query(query)
         embedding_str = "[" + ",".join(str(v) for v in query_vec) + "]"
 
-        # 페르소나에 해당하는 왕 이름
         king_name = self._get_king_name(persona_id)
 
-        sql = """
-            SELECT
-                id,
-                content,
-                metadata,
-                1 - (embedding <=> %(vec)s::vector) AS similarity
-            FROM historical_documents
-            WHERE
-                metadata->>'king' = %(king)s
-                AND 1 - (embedding <=> %(vec)s::vector) >= %(cutoff)s
-            ORDER BY embedding <=> %(vec)s::vector
-            LIMIT %(top_k)s
-        """
+        # 키워드가 없으면 keyword_score=0, hybrid_score=vector_score
+        if not keywords:
+            sql = """
+                SELECT
+                    id,
+                    content,
+                    metadata,
+                    1 - (embedding <=> %(vec)s::vector) AS vector_score,
+                    0.0::float AS keyword_score,
+                    1 - (embedding <=> %(vec)s::vector) AS hybrid_score
+                FROM historical_documents
+                WHERE
+                    metadata->>'king' = %(king)s
+                    AND 1 - (embedding <=> %(vec)s::vector) >= %(cutoff)s
+                    AND (%(category)s::text IS NULL OR metadata->>'category' = %(category)s::text)
+                ORDER BY embedding <=> %(vec)s::vector
+                LIMIT %(top_k)s
+            """
+            params = {
+                "vec": embedding_str,
+                "king": king_name,
+                "cutoff": similarity_cutoff,
+                "category": category,
+                "top_k": top_k,
+            }
+        else:
+            sql = """
+                WITH scored AS (
+                    SELECT
+                        id,
+                        content,
+                        metadata,
+                        1 - (embedding <=> %(vec)s::vector) AS vector_score,
+                        COALESCE(
+                            (
+                                SELECT COUNT(*)::float
+                                FROM jsonb_array_elements_text(metadata->'keywords') AS kw
+                                WHERE kw = ANY(%(keywords)s::text[])
+                            ) / NULLIF(array_length(%(keywords)s::text[], 1), 0),
+                            0
+                        ) AS keyword_score
+                    FROM historical_documents
+                    WHERE
+                        metadata->>'king' = %(king)s
+                        AND 1 - (embedding <=> %(vec)s::vector) >= %(cutoff)s
+                        AND (%(category)s::text IS NULL OR metadata->>'category' = %(category)s::text)
+                )
+                SELECT
+                    id,
+                    content,
+                    metadata,
+                    vector_score,
+                    keyword_score,
+                    (%(vector_weight)s * vector_score + %(kw_weight)s * keyword_score) AS hybrid_score
+                FROM scored
+                ORDER BY hybrid_score DESC
+                LIMIT %(top_k)s
+            """
+            params = {
+                "vec": embedding_str,
+                "king": king_name,
+                "cutoff": similarity_cutoff,
+                "category": category,
+                "keywords": keywords,
+                "vector_weight": vector_weight,
+                "kw_weight": keyword_weight,
+                "top_k": top_k,
+            }
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, {
-                    "vec": embedding_str,
-                    "king": king_name,
-                    "cutoff": similarity_cutoff,
-                    "top_k": top_k,
-                })
+                cur.execute(sql, params)
                 rows = cur.fetchall()
 
+        # rows: (id, content, metadata, vector_score, keyword_score, hybrid_score)
         documents = [
             {
                 "content": row[1],
                 "metadata": row[2],
                 "similarity": float(row[3]),
+                "keyword_score": float(row[4]),
+                "hybrid_score": float(row[5]),
             }
             for row in rows
         ]
@@ -116,6 +197,8 @@ class ChatService:
                 document_id=row[0],
                 content=row[1][:200] + "...",
                 similarity=float(row[3]),
+                keyword_score=float(row[4]),
+                hybrid_score=float(row[5]),
             )
             for row in rows
         ]
@@ -129,7 +212,8 @@ class ChatService:
     def create_rag_chain(self, persona_system_prompt: str):
         prompt = ChatPromptTemplate.from_messages([
             ("system", persona_system_prompt),
-            ("system", "다음은 조선왕조실록의 관련 기록입니다:\n\n{context}"),
+            ("system", "다음은 조선왕조실록에서 검색된 관련 기록의 제목과 메타데이터입니다.\n"
+                       "기록이 짧더라도 날짜·카테고리·키워드를 참고하여 역사적 맥락에 맞게 답변하세요.\n\n{context}"),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{question}"),
         ])
@@ -152,8 +236,22 @@ class ChatService:
     def format_context(self, documents: List[Dict]) -> str:
         parts = []
         for i, doc in enumerate(documents, 1):
+            meta = doc.get("metadata", {})
+            date = meta.get("date") or meta.get("original_date") or ""
+            category = meta.get("category", "")
+            keywords = meta.get("keywords", [])
+            kw_str = ", ".join(keywords) if keywords else ""
+
+            meta_line = " | ".join(filter(None, [
+                f"날짜: {date}" if date else "",
+                f"카테고리: {category}" if category else "",
+                f"키워드: {kw_str}" if kw_str else "",
+            ]))
+
             parts.append(
-                f"[문서 {i}] (유사도: {doc['similarity']:.2f})\n{doc['content']}\n"
+                f"[기록 {i}] (유사도: {doc['similarity']:.2f})\n"
+                + (f"{meta_line}\n" if meta_line else "")
+                + f"내용: {doc['content']}\n"
             )
         return "\n".join(parts)
 
@@ -179,6 +277,9 @@ class ChatService:
         chunk_overlap: int = None,
         similarity_cutoff: float = None,
         top_k: int = None,
+        keywords: Optional[List[str]] = None,
+        category: Optional[str] = None,
+        keyword_weight: Optional[float] = 0.3,
     ) -> Tuple[str, List[Source]]:
         # 1. 관련 문서 검색
         documents, sources = self.get_relevant_documents(
@@ -186,6 +287,9 @@ class ChatService:
             persona_id=persona_id,
             top_k=top_k,
             similarity_cutoff=similarity_cutoff,
+            keywords=keywords,
+            category=category,
+            keyword_weight=keyword_weight,
         )
 
         # 2. 컨텍스트 구성

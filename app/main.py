@@ -53,6 +53,9 @@ async def chat(request: ChatRequest):
             chunk_overlap=request.chunk_overlap,
             similarity_cutoff=request.similarity_cutoff,
             top_k=request.top_k,
+            keywords=request.keywords,
+            category=request.category,
+            keyword_weight=request.keyword_weight,
         )
         return ChatResponse(content=response_content, sources=sources)
 

@@ -24,12 +24,19 @@ class ChatRequest(BaseModel):
     similarity_cutoff: Optional[float] = Field(default=None, description="유사도 컷오프")
     top_k: Optional[int] = Field(default=None, description="검색할 문서 수")
 
+    # 하이브리드 검색 파라미터
+    keywords: Optional[List[str]] = Field(default=None, description="검색 키워드 목록")
+    category: Optional[str] = Field(default=None, description="카테고리 필터 (없으면 자동 감지)")
+    keyword_weight: Optional[float] = Field(default=0.3, description="키워드 점수 가중치 (0.0~1.0)")
+
 
 class Source(BaseModel):
     """출처 정보"""
     document_id: int
     content: str = Field(..., description="문서 내용 일부")
-    similarity: float = Field(..., description="유사도 점수")
+    similarity: float = Field(..., description="벡터 유사도 점수")
+    keyword_score: float = Field(default=0.0, description="키워드 매칭 점수")
+    hybrid_score: float = Field(default=0.0, description="하이브리드 최종 점수")
 
 
 class ChatResponse(BaseModel):

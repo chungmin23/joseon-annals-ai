@@ -30,12 +30,16 @@ def _get_hf_client() -> InferenceClient:
 
 def extract_keywords(text: str, top_n: int = 5) -> List[str]:
     """HuggingFace Korean NER API로 답변에서 핵심 개체명 키워드를 추출합니다."""
+    import logging
+    logger = logging.getLogger(__name__)
     try:
+        logger.info("[NER] 입력 텍스트 (앞 100자): %s", text[:100])
         client = _get_hf_client()
         results = client.token_classification(
             text[:512],
             model=_NER_MODEL,
         )
+        logger.info("[NER] API 원결과: %s", results)
 
         seen: set = set()
         keywords: List[str] = []
@@ -52,8 +56,10 @@ def extract_keywords(text: str, top_n: int = 5) -> List[str]:
                 seen.add(word)
                 keywords.append(word)
 
+        logger.info("[NER] 추출 키워드: %s", keywords[:top_n])
         return keywords[:top_n]
-    except Exception:
+    except Exception as e:
+        logger.error("[NER] 예외 발생: %s", e, exc_info=True)
         return []
 
 
@@ -258,8 +264,10 @@ class ChatService:
     def create_rag_chain(self, persona_system_prompt: str):
         prompt = ChatPromptTemplate.from_messages([
             ("system", persona_system_prompt),
-            ("system", "다음은 조선왕조실록에서 검색된 관련 기록의 제목과 메타데이터입니다.\n"
-                       "기록이 짧더라도 날짜·카테고리·키워드를 참고하여 역사적 맥락에 맞게 답변하세요.\n\n{context}"),
+            ("system", "아래는 조선왕조실록에서 검색된 관련 기록입니다. "
+                       "이 기록을 참고하여 당신의 말투와 성격을 유지한 채로 답변하세요. "
+                       "절대 AI처럼 정보를 나열하거나 해설하지 마세요. "
+                       "왕으로서 직접 경험하거나 결정한 것처럼 1인칭으로 자연스럽게 말하세요.\n\n{context}"),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{question}"),
         ])

@@ -1,9 +1,9 @@
+import os
 import re
 import psycopg
 from typing import List, Dict, Tuple, Optional
 
-from keybert import KeyBERT
-from sentence_transformers import SentenceTransformer
+from huggingface_hub import InferenceClient
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
@@ -12,21 +12,47 @@ from langchain_core.output_parsers import StrOutputParser
 from app.config import settings
 from app.schemas import Message, Source
 
-# 한국어 KeyBERT 모델 (서버 시작 시 1회 로딩)
-_ko_sentence_model = SentenceTransformer('jhgan/ko-sroberta-multitask')
-_kw_model = KeyBERT(model=_ko_sentence_model)
+# HuggingFace Korean NER 모델 (개체명 인식으로 키워드 추출)
+_NER_MODEL = "Leo97/KoELECTRA-small-v3-modu-ner"
+_hf_client: Optional[InferenceClient] = None
+
+# 추출 대상 개체 유형 (인명/지명/기관/문화재/사건/문화)
+_TARGET_ENTITIES = {"PS", "LC", "OG", "AF", "EV", "CV", "FD"}
+
+
+def _get_hf_client() -> InferenceClient:
+    global _hf_client
+    if _hf_client is None:
+        token = os.getenv("HF_TOKEN") or None
+        _hf_client = InferenceClient(token=token)
+    return _hf_client
 
 
 def extract_keywords(text: str, top_n: int = 5) -> List[str]:
-    """AI 답변에서 한국어 키워드를 추출합니다."""
+    """HuggingFace Korean NER API로 답변에서 핵심 개체명 키워드를 추출합니다."""
     try:
-        results = _kw_model.extract_keywords(
-            text,
-            keyphrase_ngram_range=(1, 2),
-            top_n=top_n,
-            stop_words=None,
+        client = _get_hf_client()
+        results = client.token_classification(
+            text[:512],
+            model=_NER_MODEL,
         )
-        return [kw[0] for kw in results]
+
+        seen: set = set()
+        keywords: List[str] = []
+        for item in results:
+            entity_group = getattr(item, 'entity_group', None) or item.get('entity_group', '')
+            word = getattr(item, 'word', None) or item.get('word', '')
+            score = getattr(item, 'score', None) or item.get('score', 0)
+
+            word = word.replace('##', '').strip()
+            if (entity_group in _TARGET_ENTITIES
+                    and score >= 0.8
+                    and len(word) >= 2
+                    and word not in seen):
+                seen.add(word)
+                keywords.append(word)
+
+        return keywords[:top_n]
     except Exception:
         return []
 

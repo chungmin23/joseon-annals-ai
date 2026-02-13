@@ -43,6 +43,7 @@ class ChatResponse(BaseModel):
     """채팅 응답"""
     content: str = Field(..., description="AI 응답 내용")
     sources: List[Source] = Field(..., description="출처 문서 목록")
+    keywords: List[str] = Field(default=[], description="답변에서 추출한 키워드 목록")
 
 
 class HealthResponse(BaseModel):

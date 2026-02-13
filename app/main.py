@@ -45,7 +45,7 @@ async def chat(request: ChatRequest):
     - 응답과 출처를 반환
     """
     try:
-        response_content, sources = chat_service.chat(
+        response_content, sources, response_keywords = chat_service.chat(
             user_message=request.message,
             persona_system_prompt=request.persona_system_prompt,
             persona_id=request.persona_id,
@@ -57,7 +57,7 @@ async def chat(request: ChatRequest):
             category=request.category,
             keyword_weight=request.keyword_weight,
         )
-        return ChatResponse(content=response_content, sources=sources)
+        return ChatResponse(content=response_content, sources=sources, keywords=response_keywords)
 
     except Exception as e:
         raise HTTPException(

@@ -2,6 +2,8 @@ import re
 import psycopg
 from typing import List, Dict, Tuple, Optional
 
+from keybert import KeyBERT
+from sentence_transformers import SentenceTransformer
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
@@ -9,6 +11,24 @@ from langchain_core.output_parsers import StrOutputParser
 
 from app.config import settings
 from app.schemas import Message, Source
+
+# 한국어 KeyBERT 모델 (서버 시작 시 1회 로딩)
+_ko_sentence_model = SentenceTransformer('jhgan/ko-sroberta-multitask')
+_kw_model = KeyBERT(model=_ko_sentence_model)
+
+
+def extract_keywords(text: str, top_n: int = 5) -> List[str]:
+    """AI 답변에서 한국어 키워드를 추출합니다."""
+    try:
+        results = _kw_model.extract_keywords(
+            text,
+            keyphrase_ngram_range=(1, 2),
+            top_n=top_n,
+            stop_words=None,
+        )
+        return [kw[0] for kw in results]
+    except Exception:
+        return []
 
 
 # 카테고리 자동 감지 키워드 맵
@@ -280,7 +300,7 @@ class ChatService:
         keywords: Optional[List[str]] = None,
         category: Optional[str] = None,
         keyword_weight: Optional[float] = 0.3,
-    ) -> Tuple[str, List[Source]]:
+    ) -> Tuple[str, List[Source], List[str]]:
         # 1. 관련 문서 검색
         documents, sources = self.get_relevant_documents(
             query=user_message,
@@ -306,7 +326,10 @@ class ChatService:
             "question": user_message,
         })
 
-        return response, sources
+        # 5. 답변에서 키워드 추출
+        response_keywords = extract_keywords(response)
+
+        return response, sources, response_keywords
 
 
 # 싱글톤 인스턴스

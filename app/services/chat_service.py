@@ -28,10 +28,45 @@ def _get_hf_client() -> InferenceClient:
     return _hf_client
 
 
+def _extract_keywords_fallback(text: str, top_n: int = 5) -> List[str]:
+    """정규식 기반 한국어 키워드 추출 (HuggingFace NER 실패 시 폴백)"""
+    import re
+    candidates: List[str] = []
+
+    # 1. 카테고리 키워드 사전에서 응답 내 등장 단어 추출
+    for kws in _CATEGORY_KEYWORDS.values():
+        for kw in kws:
+            if len(kw) >= 2 and kw in text:
+                candidates.append(kw)
+
+    # 2. 조선시대 고유명사 패턴 추출
+    extra_patterns = [
+        r'[가-힣]{2,4}대왕',
+        r'임진왜란|병자호란|정유재란|갑오개혁|을미사변|임오군란',
+        r'의금부|사헌부|사간원|성균관|한성부|이조|병조|형조|호조|예조|공조',
+        r'[가-힣]{1,3}(?:대군|공주|옹주)',
+        r'[가-힣]{1,3}(?:왕후|왕비|왕세자)',
+    ]
+    for pattern in extra_patterns:
+        matches = re.findall(pattern, text)
+        candidates.extend(matches)
+
+    seen: set = set()
+    result: List[str] = []
+    for kw in candidates:
+        if kw not in seen:
+            seen.add(kw)
+            result.append(kw)
+
+    return result[:top_n]
+
+
 def extract_keywords(text: str, top_n: int = 5) -> List[str]:
-    """HuggingFace Korean NER API로 답변에서 핵심 개체명 키워드를 추출합니다."""
+    """HuggingFace Korean NER API로 답변에서 핵심 개체명 키워드를 추출합니다.
+    API 실패 또는 결과 없을 시 정규식 기반 폴백을 사용합니다."""
     import logging
     logger = logging.getLogger(__name__)
+    ner_keywords: List[str] = []
     try:
         logger.info("[NER] 입력 텍스트 (앞 100자): %s", text[:100])
         client = _get_hf_client()
@@ -39,10 +74,9 @@ def extract_keywords(text: str, top_n: int = 5) -> List[str]:
             text[:512],
             model=_NER_MODEL,
         )
-        logger.info("[NER] API 원결과: %s", results)
+        logger.info("[NER] API 원결과 수: %d", len(results) if results else 0)
 
         seen: set = set()
-        keywords: List[str] = []
         for item in results:
             entity_group = getattr(item, 'entity_group', None) or item.get('entity_group', '')
             word = getattr(item, 'word', None) or item.get('word', '')
@@ -50,17 +84,23 @@ def extract_keywords(text: str, top_n: int = 5) -> List[str]:
 
             word = word.replace('##', '').strip()
             if (entity_group in _TARGET_ENTITIES
-                    and score >= 0.8
+                    and score >= 0.7
                     and len(word) >= 2
                     and word not in seen):
                 seen.add(word)
-                keywords.append(word)
+                ner_keywords.append(word)
 
-        logger.info("[NER] 추출 키워드: %s", keywords[:top_n])
-        return keywords[:top_n]
+        logger.info("[NER] 추출 키워드: %s", ner_keywords[:top_n])
     except Exception as e:
         logger.error("[NER] 예외 발생: %s", e, exc_info=True)
-        return []
+
+    if ner_keywords:
+        return ner_keywords[:top_n]
+
+    # NER 결과 없을 때 폴백
+    fallback = _extract_keywords_fallback(text, top_n)
+    logger.info("[NER] 폴백 키워드 사용: %s", fallback)
+    return fallback
 
 
 # 카테고리 자동 감지 키워드 맵

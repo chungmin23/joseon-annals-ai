@@ -1,9 +1,16 @@
+import logging
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas import ChatRequest, ChatResponse, HealthResponse
 from app.services.chat_service import chat_service
 from app.config import settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 # FastAPI 앱 생성
 app = FastAPI(

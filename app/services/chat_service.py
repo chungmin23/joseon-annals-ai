@@ -435,6 +435,11 @@ class ChatService:
         # 5. 답변에서 키워드 추출
         response_keywords = extract_keywords(response)
 
+        # 6. 왕 이름이 키워드에 없으면 맨 앞에 추가
+        king_name = self._get_king_name(persona_id)
+        if king_name and king_name not in response_keywords:
+            response_keywords.insert(0, king_name)
+
         return response, sources, response_keywords
 
 

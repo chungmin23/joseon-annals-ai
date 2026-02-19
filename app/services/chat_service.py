@@ -150,8 +150,6 @@ _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
 class ChatService:
     """LangChain 기반 RAG 채팅 서비스 (historical_documents 직접 쿼리)"""
 
-    _king_name_cache: Dict[int, str] = {}  # persona_id → king_name 메모리 캐시
-
     def __init__(self):
         # OpenAI LLM
         self.llm = ChatOpenAI(
@@ -187,10 +185,6 @@ class ChatService:
         import logging
         logger = logging.getLogger(__name__)
 
-        # 캐시 히트 시 DB 조회 생략
-        if persona_id in self._king_name_cache:
-            return self._king_name_cache[persona_id]
-
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT name FROM personas WHERE persona_id = %s", (persona_id,))
@@ -200,10 +194,8 @@ class ChatService:
                     name = re.sub(r'\(.*?\)', '', raw_name.split()[0]).strip()
                     name = re.sub(r'대왕$', '', name).strip()
                     logger.info("[RAG] persona_id=%s, DB name='%s' → king_name='%s'", persona_id, raw_name, name)
-                    self._king_name_cache[persona_id] = name
                     return name
                 logger.warning("[RAG] persona_id=%s 페르소나를 찾을 수 없음", persona_id)
-                self._king_name_cache[persona_id] = ""
                 return ""
 
     # ──────────────────────────────────────────────
@@ -461,13 +453,11 @@ class ChatService:
             "question": user_message,
         })
 
-        # 5. 키워드 추출 + 왕 이름 보장 (캐시된 king_name 재사용)
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(extract_keywords, response)
-            king_name = self._get_king_name(persona_id)  # 캐시 히트 → 즉시 반환
-            response_keywords = future.result(timeout=3)  # NER 최대 3초 대기
+        # 5. 답변에서 키워드 추출
+        response_keywords = extract_keywords(response)
 
+        # 6. 왕 이름이 키워드에 없으면 맨 앞에 추가
+        king_name = self._get_king_name(persona_id)
         if king_name and king_name not in response_keywords:
             response_keywords.insert(0, king_name)
 

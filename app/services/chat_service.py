@@ -182,12 +182,21 @@ class ChatService:
     # ──────────────────────────────────────────────
 
     def _get_king_name(self, persona_id: int) -> str:
+        import logging
+        logger = logging.getLogger(__name__)
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT name FROM personas WHERE id = %s", (persona_id,))
+                cur.execute("SELECT name FROM personas WHERE persona_id = %s", (persona_id,))
                 row = cur.fetchone()
                 if row:
-                    return re.sub(r'\(.*?\)', '', row[0].split()[0]).strip()
+                    raw_name = row[0]
+                    # 괄호 제거 후 첫 단어 추출: "태조 이성계" → "태조"
+                    name = re.sub(r'\(.*?\)', '', raw_name.split()[0]).strip()
+                    # "세종대왕" → "세종" 처럼 "대왕" 접미사 제거
+                    name = re.sub(r'대왕$', '', name).strip()
+                    logger.info("[RAG] persona_id=%s, DB name='%s' → king_name='%s'", persona_id, raw_name, name)
+                    return name
+                logger.warning("[RAG] persona_id=%s 페르소나를 찾을 수 없음", persona_id)
                 return ""
 
     # ──────────────────────────────────────────────
@@ -299,10 +308,23 @@ class ChatService:
                 "top_k": top_k,
             }
 
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("[RAG] 검색 시작 → king='%s', category='%s', keywords=%s, cutoff=%.2f, top_k=%d",
+                    king_name, category, keywords, similarity_cutoff, top_k)
+
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
+
+        logger.info("[RAG] 검색 결과=%d건", len(rows))
+        if rows:
+            for i, row in enumerate(rows[:3]):  # 상위 3건만 로그
+                logger.info("[RAG] 결과[%d] doc_id=%s, vector=%.3f, keyword=%.3f, hybrid=%.3f | %s",
+                            i, row[0], float(row[3]), float(row[4]), float(row[5]), str(row[1])[:60])
+        else:
+            logger.warning("[RAG] 검색 결과 0건 → king='%s' 으로 historical_documents에서 문서를 찾지 못함", king_name)
 
         # rows: (id, content, metadata, vector_score, keyword_score, hybrid_score)
         documents = [

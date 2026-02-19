@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # RAG Settings
     chunk_overlap: int = Field(default=200, env="CHUNK_OVERLAP")
-    similarity_cutoff: float = Field(default=0.7, env="SIMILARITY_CUTOFF")
+    similarity_cutoff: float = Field(default=0.5, env="SIMILARITY_CUTOFF")
     top_k_documents: int = Field(default=5, env="TOP_K_DOCUMENTS")
 
     # FastAPI

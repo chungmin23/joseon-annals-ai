@@ -19,6 +19,9 @@ _hf_client: Optional[InferenceClient] = None
 # 추출 대상 개체 유형 (인명/지명/기관/문화재/사건/문화)
 _TARGET_ENTITIES = {"PS", "LC", "OG", "AF", "EV", "CV", "FD"}
 
+# Kiwi 형태소 분석기 싱글톤
+_kiwi_instance = None
+
 
 def _get_hf_client() -> InferenceClient:
     global _hf_client
@@ -28,18 +31,47 @@ def _get_hf_client() -> InferenceClient:
     return _hf_client
 
 
+def _get_kiwi():
+    global _kiwi_instance
+    if _kiwi_instance is None:
+        from kiwipiepy import Kiwi
+        _kiwi_instance = Kiwi()
+    return _kiwi_instance
+
+
+def _extract_keywords_kiwi(text: str, top_n: int = 5) -> List[str]:
+    """Kiwi 형태소 분석으로 명사 키워드 추출 (NNG: 일반명사, NNP: 고유명사)"""
+    kiwi = _get_kiwi()
+    tokens = kiwi.tokenize(text[:512])
+    noun_tags = {"NNG", "NNP"}
+    freq: Dict[str, int] = {}
+    for token in tokens:
+        tag = token.tag.name if hasattr(token.tag, "name") else str(token.tag)
+        if tag in noun_tags and len(token.form) >= 2:
+            freq[token.form] = freq.get(token.form, 0) + 1
+    sorted_nouns = sorted(freq.items(), key=lambda x: -x[1])
+    return [word for word, _ in sorted_nouns[:top_n]]
+
+
 def _extract_keywords_fallback(text: str, top_n: int = 5) -> List[str]:
-    """정규식 기반 한국어 키워드 추출 (HuggingFace NER 실패 시 폴백)"""
-    import re
+    """Kiwi 형태소 분석 기반 키워드 추출 (HuggingFace NER 실패 시 폴백).
+    Kiwi 실패 시 정규식/사전 기반 최후 폴백 사용."""
+    # 1. Kiwi 형태소 분석 시도
+    try:
+        keywords = _extract_keywords_kiwi(text, top_n)
+        if keywords:
+            return keywords
+    except Exception:
+        pass
+
+    # 2. 정규식/사전 기반 최후 폴백
     candidates: List[str] = []
 
-    # 1. 카테고리 키워드 사전에서 응답 내 등장 단어 추출
     for kws in _CATEGORY_KEYWORDS.values():
         for kw in kws:
             if len(kw) >= 2 and kw in text:
                 candidates.append(kw)
 
-    # 2. 조선시대 고유명사 패턴 추출
     extra_patterns = [
         r'[가-힣]{2,4}대왕',
         r'임진왜란|병자호란|정유재란|갑오개혁|을미사변|임오군란',

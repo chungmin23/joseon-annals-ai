@@ -1,7 +1,9 @@
+import json
 import logging
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from app.schemas import ChatRequest, ChatResponse, HealthResponse
 from app.services.chat_service import chat_service
@@ -11,6 +13,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+logger = logging.getLogger(__name__)
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -30,6 +34,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def warmup():
+    """앱 시작 시 Kiwi 형태소 분석기를 미리 초기화합니다.
+    첫 요청에서 발생하는 2-3초 지연을 제거합니다."""
+    import asyncio
+    from app.services.chat_service import _get_kiwi
+
+    def _init_kiwi():
+        logger.info("[Warmup] Kiwi 초기화 시작...")
+        _get_kiwi()
+        logger.info("[Warmup] Kiwi 초기화 완료")
+
+    # 블로킹 초기화를 스레드풀에서 실행 (이벤트 루프 블로킹 방지)
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _init_kiwi)
 
 
 @app.get("/health", response_model=HealthResponse)

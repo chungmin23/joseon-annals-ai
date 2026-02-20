@@ -23,20 +23,28 @@ _TARGET_ENTITIES = {"PS", "LC", "OG", "AF", "EV", "CV", "FD"}
 # Kiwi 형태소 분석기 싱글톤
 _kiwi_instance = None
 
+# 페르소나 왕 이름 캐시 (persona_id → king_name, 서비스 재시작 전까지 불변)
+_king_name_cache: Dict[int, str] = {}
+
 
 def _get_hf_client() -> InferenceClient:
     global _hf_client
     if _hf_client is None:
         token = os.getenv("HF_TOKEN") or None
-        _hf_client = InferenceClient(token=token)
+        # timeout=3.0: HuggingFace API 실패 시 3초 내로 포기하고 Kiwi 폴백으로 전환
+        _hf_client = InferenceClient(token=token, timeout=3.0)
     return _hf_client
 
 
 def _get_kiwi():
     global _kiwi_instance
     if _kiwi_instance is None:
+        import logging
+        logger = logging.getLogger(__name__)
+        t0 = time.time()
         from kiwipiepy import Kiwi
         _kiwi_instance = Kiwi()
+        logger.info("[Kiwi] 초기화 완료: %.3fs", time.time() - t0)
     return _kiwi_instance
 
 
@@ -186,6 +194,10 @@ class ChatService:
         import logging
         logger = logging.getLogger(__name__)
 
+        # 캐시 히트: DB 커넥션 없이 즉시 반환
+        if persona_id in _king_name_cache:
+            return _king_name_cache[persona_id]
+
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT name FROM personas WHERE persona_id = %s", (persona_id,))
@@ -194,9 +206,11 @@ class ChatService:
                     raw_name = row[0]
                     name = re.sub(r'\(.*?\)', '', raw_name.split()[0]).strip()
                     name = re.sub(r'대왕$', '', name).strip()
-                    logger.info("[RAG] persona_id=%s, DB name='%s' → king_name='%s'", persona_id, raw_name, name)
+                    logger.info("[RAG] persona_id=%s, DB name='%s' → king_name='%s' (캐시 저장)", persona_id, raw_name, name)
+                    _king_name_cache[persona_id] = name
                     return name
                 logger.warning("[RAG] persona_id=%s 페르소나를 찾을 수 없음", persona_id)
+                _king_name_cache[persona_id] = ""
                 return ""
 
     # ──────────────────────────────────────────────

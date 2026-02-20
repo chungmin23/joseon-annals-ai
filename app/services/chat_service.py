@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import psycopg
 from typing import List, Dict, Tuple, Optional
 
@@ -428,7 +429,12 @@ class ChatService:
         category: Optional[str] = None,
         keyword_weight: Optional[float] = 0.3,
     ) -> Tuple[str, List[Source], List[str]]:
-        # 1. 관련 문서 검색
+        import logging
+        logger = logging.getLogger(__name__)
+        t_total = time.time()
+
+        # ① RAG 문서 검색 (임베딩 생성 + pgvector 쿼리)
+        t0 = time.time()
         documents, sources = self.get_relevant_documents(
             query=user_message,
             persona_id=persona_id,
@@ -438,28 +444,41 @@ class ChatService:
             category=category,
             keyword_weight=keyword_weight,
         )
+        t_rag = time.time() - t0
+        logger.info("[TIMING] ① RAG 검색 (임베딩+pgvector): %.3fs | 결과 %d건", t_rag, len(documents))
 
-        # 2. 컨텍스트 구성
+        # ② 컨텍스트 / 히스토리 구성
+        t0 = time.time()
         context = self.format_context(documents)
-
-        # 3. 히스토리 포맷팅
         formatted_history = self.format_chat_history(chat_history or [])
+        t_fmt = time.time() - t0
+        logger.info("[TIMING] ② 컨텍스트/히스토리 포맷: %.3fs", t_fmt)
 
-        # 4. RAG 체인 실행
+        # ③ LLM 호출 (gpt-4o-mini invoke)
+        t0 = time.time()
         rag_chain = self.create_rag_chain(persona_system_prompt)
         response = rag_chain.invoke({
             "context": context,
             "chat_history": formatted_history,
             "question": user_message,
         })
+        t_llm = time.time() - t0
+        logger.info("[TIMING] ③ LLM 응답 생성: %.3fs | 응답 %d자", t_llm, len(response))
 
-        # 5. 답변에서 키워드 추출
+        # ④ 키워드 추출 (HuggingFace NER or Kiwi fallback)
+        t0 = time.time()
         response_keywords = extract_keywords(response)
-
-        # 6. 왕 이름이 키워드에 없으면 맨 앞에 추가
         king_name = self._get_king_name(persona_id)
         if king_name and king_name not in response_keywords:
             response_keywords.insert(0, king_name)
+        t_kw = time.time() - t0
+        logger.info("[TIMING] ④ 키워드 추출: %.3fs | keywords=%s", t_kw, response_keywords)
+
+        t_total = time.time() - t_total
+        logger.info(
+            "[TIMING] ===== 전체 %.3fs (RAG %.3fs + LLM %.3fs + KW %.3fs + fmt %.3fs) =====",
+            t_total, t_rag, t_llm, t_kw, t_fmt,
+        )
 
         return response, sources, response_keywords
 

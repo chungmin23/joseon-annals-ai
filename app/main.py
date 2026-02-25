@@ -94,6 +94,30 @@ async def chat(request: ChatRequest):
         )
 
 
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """SSE 스트리밍 채팅 API — 토큰 단위로 실시간 전송"""
+    async def generate():
+        try:
+            async for data in chat_service.stream_chat(
+                user_message=request.message,
+                persona_system_prompt=request.persona_system_prompt,
+                persona_id=request.persona_id,
+                chat_history=request.history,
+                similarity_cutoff=request.similarity_cutoff,
+                top_k=request.top_k,
+                keywords=request.keywords,
+                category=request.category,
+                keyword_weight=request.keyword_weight,
+            ):
+                yield f"data: {data}\n\n"
+        except Exception as e:
+            logger.error("Stream error: %s", e)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.get("/")
 async def root():
     return {

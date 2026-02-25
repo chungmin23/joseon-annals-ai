@@ -167,6 +167,7 @@ class ChatService:
             model=settings.openai_chat_model,
             temperature=0.7,
             openai_api_key=settings.openai_api_key,
+            streaming=True,
         )
 
         # OpenAI Embeddings (DB 저장 차원: 1536)

@@ -427,6 +427,87 @@ class ChatService:
         return messages
 
     # ──────────────────────────────────────────────
+    # 스트리밍 채팅 메서드 (SSE)
+    # ──────────────────────────────────────────────
+
+    async def stream_chat(
+        self,
+        user_message: str,
+        persona_system_prompt: str,
+        persona_id: int,
+        chat_history: List[Message] = None,
+        similarity_cutoff: float = None,
+        top_k: int = None,
+        keywords: Optional[List[str]] = None,
+        category: Optional[str] = None,
+        keyword_weight: Optional[float] = 0.3,
+    ):
+        """SSE 스트리밍 채팅 — 토큰 단위로 yield"""
+        import asyncio
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # ① RAG 검색 (blocking → executor)
+        t0 = time.time()
+        loop = asyncio.get_running_loop()
+        documents, sources = await loop.run_in_executor(
+            None,
+            lambda: self.get_relevant_documents(
+                query=user_message,
+                persona_id=persona_id,
+                top_k=top_k,
+                similarity_cutoff=similarity_cutoff,
+                keywords=keywords,
+                category=category,
+                keyword_weight=keyword_weight,
+            )
+        )
+        logger.info("[STREAM][TIMING] ① RAG 검색: %.3fs | %d건", time.time() - t0, len(documents))
+
+        # ② 컨텍스트/히스토리 구성
+        context = self.format_context(documents)
+        formatted_history = self.format_chat_history(chat_history or [])
+
+        # ③ LLM 스트리밍
+        t0 = time.time()
+        rag_chain = self.create_rag_chain(persona_system_prompt)
+        full_response = ""
+        async for chunk in rag_chain.astream({
+            "context": context,
+            "chat_history": formatted_history,
+            "question": user_message,
+        }):
+            if chunk:
+                full_response += chunk
+                yield json.dumps({"type": "token", "content": chunk}, ensure_ascii=False)
+        logger.info("[STREAM][TIMING] ③ LLM 스트리밍: %.3fs | %d자", time.time() - t0, len(full_response))
+
+        # ④ 키워드 추출 (blocking → executor)
+        t0 = time.time()
+        response_keywords = await loop.run_in_executor(None, lambda: extract_keywords(full_response))
+        king_name = self._get_king_name(persona_id)
+        if king_name and king_name not in response_keywords:
+            response_keywords.insert(0, king_name)
+        logger.info("[STREAM][TIMING] ④ 키워드 추출: %.3fs | %s", time.time() - t0, response_keywords)
+
+        # ⑤ DONE 이벤트 전송
+        sources_data = [
+            {
+                "documentId": s.document_id,
+                "content": s.content,
+                "similarity": s.similarity,
+                "keywordScore": s.keyword_score,
+                "hybridScore": s.hybrid_score,
+            }
+            for s in sources
+        ]
+        yield json.dumps({
+            "type": "done",
+            "sources": sources_data,
+            "keywords": response_keywords,
+        }, ensure_ascii=False)
+
+    # ──────────────────────────────────────────────
     # 메인 채팅 메서드
     # ──────────────────────────────────────────────
 
